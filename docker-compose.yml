@@ -1,0 +1,78 @@
+services:
+  # ------------------------------------------------------------------
+  # 1. RabbitMQ — the message broker (+ management dashboard)
+  # ------------------------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:4-management   # multi-arch: works on Apple Silicon (arm64) and Intel
+    hostname: rabbitmq             # fixed node name, so data in the volume is reused
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-tutorial}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-tutorial123}
+    ports:
+      - "127.0.0.1:15672:15672"    # dashboard, localhost only
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      # Healthy only once RabbitMQ accepts connections on its AMQP port
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 10s
+
+  # ------------------------------------------------------------------
+  # 2. order-app — PHP web page that PUBLISHES orders (producer)
+  # ------------------------------------------------------------------
+  order-app:
+    build: .
+    command: php -S 0.0.0.0:8080 -t /app/order-app
+    init: true                     # lets "docker compose stop" end PHP immediately
+    environment:
+      RABBITMQ_HOST: rabbitmq      # the Docker service name
+      RABBITMQ_USER: ${RABBITMQ_USER:-tutorial}
+      RABBITMQ_PASS: ${RABBITMQ_PASS:-tutorial123}
+    ports:
+      - "127.0.0.1:8080:8080"      # web app, localhost only
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  # ------------------------------------------------------------------
+  # 3. workers — two PHP CLI processes that CONSUME orders (consumers)
+  #    Both read the same "orders" queue; RabbitMQ splits the orders
+  #    between them (each order goes to only ONE worker).
+  # ------------------------------------------------------------------
+  worker-1:
+    build: .
+    command: php /app/worker/worker.php
+    init: true
+    restart: on-failure            # if it exits with an error, start again
+    environment:
+      WORKER_NAME: worker-1        # shown in logs and orders.txt
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: ${RABBITMQ_USER:-tutorial}
+      RABBITMQ_PASS: ${RABBITMQ_PASS:-tutorial123}
+    volumes:
+      - ./output:/app/output       # orders.txt shows up in ./output on your machine
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  worker-2:
+    build: .
+    command: php /app/worker/worker.php
+    init: true
+    restart: on-failure
+    environment:
+      WORKER_NAME: worker-2
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: ${RABBITMQ_USER:-tutorial}
+      RABBITMQ_PASS: ${RABBITMQ_PASS:-tutorial123}
+    volumes:
+      - ./output:/app/output       # both workers append to the same orders.txt
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  rabbitmq-data:
